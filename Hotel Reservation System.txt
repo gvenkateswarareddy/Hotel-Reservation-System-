@@ -1,0 +1,294 @@
+import React, { useState, useMemo } from "react";
+
+// Hotel Room Reservation App (single-file React component)
+// Usage: Render <ReservationApp /> in your React app. Tailwind CSS expected for styling.
+
+const FLOORS = 10;
+const ROOMS_PER_FLOOR = 10; // for floors 1-9
+const TOP_FLOOR_ROOMS = 7; // floor 10
+
+function makeInitialRooms() {
+  const floors = [];
+  for (let f = 1; f <= FLOORS; f++) {
+    const rooms = [];
+    const count = f === 10 ? TOP_FLOOR_ROOMS : ROOMS_PER_FLOOR;
+    for (let r = 1; r <= count; r++) {
+      const roomNumber = f === 10 ? 1000 + r : f * 100 + r;
+      rooms.push({
+        id: `${roomNumber}`,
+        floor: f,
+        indexOnFloor: r, // 1-based
+        number: roomNumber,
+        occupied: false,
+        reserved: false,
+      });
+    }
+    floors.push({ floor: f, rooms });
+  }
+  return floors;
+}
+
+// Map a room to a linear coordinate used for travel-time minimization.
+// We use: vertical unit = 2 minutes per floor, horizontal unit = 1 minute per room index difference.
+// Coordinate = floorVertical + horizontalPosition
+function roomCoordinate(room) {
+  // We'll map floors to vertical offset (floor index starting at 1 -> 0 vertical for same-floor baseline)
+  // Use (floor - 1) * 2 to represent vertical minutes from floor 1
+  return (room.floor - 1) * 2 + (room.indexOnFloor - 1);
+}
+
+function travelSpanForRooms(roomList) {
+  if (!roomList || roomList.length === 0) return 0;
+  const coords = roomList.map(roomCoordinate).sort((a, b) => a - b);
+  return coords[coords.length - 1] - coords[0];
+}
+
+export default function ReservationApp() {
+  const [building, setBuilding] = useState(makeInitialRooms());
+  const [lastBooked, setLastBooked] = useState([]);
+  const [numToBook, setNumToBook] = useState(1);
+
+  // Helpers
+  const getAllFreeRooms = (bld = building) =>
+    bld.flatMap((f) => f.rooms).filter((r) => !r.occupied && !r.reserved);
+
+  const resetAll = () => {
+    setBuilding(makeInitialRooms());
+    setLastBooked([]);
+  };
+
+  const randomOccupancy = (prob = 0.25) => {
+    // Mark random occupied rooms (not reserved) with probability prob
+    setBuilding((prev) =>
+      prev.map((floor) => ({
+        ...floor,
+        rooms: floor.rooms.map((r) => ({ ...r, occupied: Math.random() < prob, reserved: false })),
+      }))
+    );
+    setLastBooked([]);
+  };
+
+  // Booking algorithm as described in the assignment:
+  // 1) Try to find k free rooms on the same floor that minimize horizontal travel span.
+  // 2) If none, choose k free rooms across floors that minimize combined vertical+horizontal span.
+  // We allow up to 5 rooms.
+  const bookRooms = (k) => {
+    k = Number(k);
+    if (!k || k < 1 || k > 5) {
+      alert("Please enter a number between 1 and 5.");
+      return;
+    }
+
+    // Find best same-floor selection
+    let bestSameFloor = null; // {floor, rooms, span}
+
+    for (const floor of building) {
+      const free = floor.rooms
+        .map((r, i) => ({ ...r, idx: i }))
+        .filter((r) => !r.occupied && !r.reserved);
+      if (free.length >= k) {
+        // sliding window on indices to pick k rooms minimizing horizontal span
+        const indices = free.map((r) => r.idx);
+        // note: we only consider the sequence in the order of room index
+        for (let start = 0; start <= indices.length - k; start++) {
+          const end = start + k - 1;
+          const span = indices[end] - indices[start];
+          if (!bestSameFloor || span < bestSameFloor.span) {
+            bestSameFloor = {
+              floor: floor.floor,
+              rooms: free.slice(start, start + k),
+              span,
+            };
+          }
+        }
+      }
+    }
+
+    if (bestSameFloor) {
+      // Reserve those rooms
+      setBuilding((prev) =>
+        prev.map((floor) => ({
+          ...floor,
+          rooms: floor.rooms.map((r) =>
+            bestSameFloor.rooms.some((br) => br.id === r.id) ? { ...r, reserved: true } : r
+          ),
+        }))
+      );
+      setLastBooked(bestSameFloor.rooms);
+      return;
+    }
+
+    // No same-floor solution: pick global k free rooms minimizing travel span
+    const allFree = getAllFreeRooms();
+    if (allFree.length < k) {
+      alert("Not enough free rooms available.");
+      return;
+    }
+
+    // Sort free rooms by their coordinate
+    const sorted = allFree.slice().sort((a, b) => roomCoordinate(a) - roomCoordinate(b));
+    let bestGlobal = null; // {rooms, span}
+    for (let i = 0; i <= sorted.length - k; i++) {
+      const window = sorted.slice(i, i + k);
+      const span = travelSpanForRooms(window);
+      if (!bestGlobal || span < bestGlobal.span) {
+        bestGlobal = { rooms: window, span };
+      }
+    }
+
+    if (bestGlobal) {
+      setBuilding((prev) =>
+        prev.map((floor) => ({
+          ...floor,
+          rooms: floor.rooms.map((r) =>
+            bestGlobal.rooms.some((br) => br.id === r.id) ? { ...r, reserved: true } : r
+          ),
+        }))
+      );
+      setLastBooked(bestGlobal.rooms);
+    }
+  };
+
+  const confirmBooking = () => {
+    // turn reserved into occupied
+    setBuilding((prev) =>
+      prev.map((floor) => ({
+        ...floor,
+        rooms: floor.rooms.map((r) => (r.reserved ? { ...r, occupied: true, reserved: false } : r)),
+      }))
+    );
+    setLastBooked([]);
+  };
+
+  const cancelReservation = () => {
+    setBuilding((prev) =>
+      prev.map((floor) => ({
+        ...floor,
+        rooms: floor.rooms.map((r) => (r.reserved ? { ...r, reserved: false } : r)),
+      }))
+    );
+    setLastBooked([]);
+  };
+
+  // Toggle a single room occupancy manually
+  const toggleRoom = (roomId) => {
+    setBuilding((prev) =>
+      prev.map((floor) => ({
+        ...floor,
+        rooms: floor.rooms.map((r) => (r.id === roomId ? { ...r, occupied: !r.occupied } : r)),
+      }))
+    );
+  };
+
+  const totalTravelTimeOfLastBooked = useMemo(() => {
+    if (!lastBooked || lastBooked.length === 0) return 0;
+    return travelSpanForRooms(lastBooked);
+  }, [lastBooked]);
+
+  return (
+    <div className="p-6 max-w-6xl mx-auto">
+      <h1 className="text-2xl font-semibold mb-4">Hotel Room Reservation — SDE3 Assessment</h1>
+
+      <div className="flex gap-3 mb-4 flex-wrap">
+        <input
+          type="number"
+          min={1}
+          max={5}
+          value={numToBook}
+          onChange={(e) => setNumToBook(e.target.value)}
+          className="border px-3 py-2 rounded w-28"
+        />
+        <button
+          onClick={() => bookRooms(numToBook)}
+          className="px-4 py-2 rounded bg-blue-600 text-white hover:bg-blue-700"
+        >
+          Book {numToBook} room{numToBook > 1 ? "s" : ""}
+        </button>
+        <button onClick={confirmBooking} className="px-4 py-2 rounded bg-green-600 text-white">
+          Confirm Booking
+        </button>
+        <button onClick={cancelReservation} className="px-4 py-2 rounded bg-yellow-500 text-white">
+          Cancel Reservation
+        </button>
+        <button onClick={() => randomOccupancy(0.25)} className="px-4 py-2 rounded bg-gray-600 text-white">
+          Random Occupancy
+        </button>
+        <button onClick={resetAll} className="px-4 py-2 rounded bg-red-600 text-white">
+          Reset All
+        </button>
+      </div>
+
+      <div className="mb-3">
+        <strong>Last selection travel time:</strong> {totalTravelTimeOfLastBooked} minute(s)
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div>
+          <h2 className="font-semibold mb-2">Building (click a room to toggle occupied)</h2>
+          <div className="space-y-3">
+            {building
+              .slice()
+              .reverse()
+              .map((floor) => (
+                <div key={floor.floor} className="p-3 border rounded">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="font-medium">Floor {floor.floor}</div>
+                    <div className="text-sm text-gray-600">Rooms: {floor.rooms.length}</div>
+                  </div>
+                  <div className="flex gap-2 flex-wrap">
+                    {floor.rooms.map((room) => (
+                      <button
+                        key={room.id}
+                        onClick={() => toggleRoom(room.id)}
+                        className={`px-3 py-2 rounded w-20 text-sm border flex flex-col items-center justify-center
+                          ${room.occupied ? "bg-gray-800 text-white" : room.reserved ? "bg-orange-400" : "bg-white"}`}
+                        title={`Room ${room.number} — ${room.occupied ? "Occupied" : room.reserved ? "Reserved" : "Free"}`}
+                      >
+                        <div className="font-medium">{room.number}</div>
+                        <div className="text-xs">{room.occupied ? "Occupied" : room.reserved ? "Reserved" : "Free"}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+          </div>
+        </div>
+
+        <div>
+          <h2 className="font-semibold mb-2">Reservation Summary / Controls</h2>
+          <div className="p-3 border rounded mb-3">
+            <h3 className="font-medium">Last Selected Rooms</h3>
+            <div className="mt-2">
+              {lastBooked.length === 0 ? (
+                <div className="text-sm text-gray-600">No rooms selected.</div>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {lastBooked.map((r) => (
+                    <div key={r.id} className="px-3 py-2 bg-orange-100 rounded border">
+                      {r.number} (Floor {r.floor})
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="mt-3 text-sm">
+              <strong>Computed travel time (first↔last):</strong> {totalTravelTimeOfLastBooked} minute(s)
+            </div>
+          </div>
+
+          <div className="p-3 border rounded">
+            <h3 className="font-medium">Guidelines</h3>
+            <ul className="list-disc ml-5 mt-2 text-sm text-gray-700">
+              <li>Up to 5 rooms can be booked in one request.</li>
+              <li>First we attempt same-floor rooms minimizing horizontal span.</li>
+              <li>If not possible, system minimizes combined vertical + horizontal travel span.</li>
+              <li>Click a room to toggle manual occupancy for testing.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <footer className="mt-6 text-sm text-gray-600">Built for SDE3 assessment — live URL deliverable: export & host this component in any React app.</footer>
+    </div>
+  );
+}
